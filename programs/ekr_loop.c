@@ -117,9 +117,13 @@ conn_output(void *addr, void *buf, size_t length, uint8_t tos, uint8_t set_df)
 	}
 #ifdef _WIN32
 	if (send(*fdp, buf, (int)length, 0) == SOCKET_ERROR) {
+		fprintf(stderr, "send() failed!\n");
+		exit(EXIT_FAILURE);
 		return (WSAGetLastError());
 #else
 	if (send(*fdp, buf, length, 0) < 0) {
+		fprintf(stderr, "send() failed!\n");
+		exit(EXIT_FAILURE);
 		return (errno);
 #endif
 	} else {
@@ -491,8 +495,6 @@ main(int argc, char *argv[])
 	sndinfo.snd_context = 0;
 	sndinfo.snd_assoc_id = 0;
 
-
-
 	for (i = 0; i < NUMBER_OF_STEPS; i++) {
 		j = 0;
 		if (i % 2) {
@@ -534,6 +536,7 @@ main(int argc, char *argv[])
 		}
 		debug_printf("Sending done, sleeping\n");
 	}
+
 	free(line);
 	usrsctp_shutdown(s_c, SHUT_WR);
 
