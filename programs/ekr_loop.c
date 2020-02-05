@@ -135,20 +135,20 @@ static int
 receive_cb(struct socket *sock, union sctp_sockstore addr, void *data,
            size_t datalen, struct sctp_rcvinfo rcv, int flags, void *ulp_info)
 {
-	debug_printf("MSG RCV: %p received on sock = %p.\n", data, (void *)sock);
+	//debug_printf("MSG RCV: %p received on sock = %p.\n", data, (void *)sock);
 	if (data) {
 		if ((flags & MSG_NOTIFICATION) == 0) {
 			debug_printf("MSG RCV: length %d, addr %p:%u, stream %u, SSN %u, TSN %u, PPID %u, context %u, %s%s.\n",
-			       (int)datalen,
-			       addr.sconn.sconn_addr,
-			       ntohs(addr.sconn.sconn_port),
-			       rcv.rcv_sid,
-			       rcv.rcv_ssn,
-			       rcv.rcv_tsn,
-			       ntohl(rcv.rcv_ppid),
-			       rcv.rcv_context,
-			       (rcv.rcv_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
-				   (flags & MSG_EOR) ? ", EOR" : "");
+				(int)datalen,
+				addr.sconn.sconn_addr,
+				ntohs(addr.sconn.sconn_port),
+				rcv.rcv_sid,
+				rcv.rcv_ssn,
+				rcv.rcv_tsn,
+				ntohl(rcv.rcv_ppid),
+				rcv.rcv_context,
+				(rcv.rcv_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
+				(flags & MSG_EOR) ? ", EOR" : "");
 		}
 		free(data);
 	} else {
@@ -278,7 +278,7 @@ main(int argc, char *argv[])
 #else
 	pthread_t tid_c, tid_s;
 #endif
-	int i, j, cur_buf_size, snd_buf_size, rcv_buf_size, sendv_retries_left;
+	int i, j, cur_buf_size, snd_buf_size, rcv_buf_size, sendv_retries_left, on;
 	socklen_t opt_len;
 	struct sctp_sndinfo sndinfo;
 	char *line;
@@ -440,6 +440,13 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 	debug_printf("to %d.\n", cur_buf_size);
+
+	on = 1;
+	if (usrsctp_setsockopt(s_l, IPPROTO_SCTP, SCTP_RECVRCVINFO, &on, sizeof(int)) < 0) {
+		perror("usrsctp_setsockopt");
+		exit(EXIT_FAILURE);
+	}
+
 	/* Bind the client side. */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -452,6 +459,7 @@ main(int argc, char *argv[])
 		perror("usrsctp_bind");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Bind the server side. */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -464,11 +472,13 @@ main(int argc, char *argv[])
 		perror("usrsctp_bind");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Make server side passive... */
 	if (usrsctp_listen(s_l, 1) < 0) {
 		perror("usrsctp_listen");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Initiate the handshake */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -481,11 +491,14 @@ main(int argc, char *argv[])
 		perror("usrsctp_connect");
 		exit(EXIT_FAILURE);
 	}
+
 	if ((s_s = usrsctp_accept(s_l, NULL, NULL)) == NULL) {
 		perror("usrsctp_accept");
 		exit(EXIT_FAILURE);
 	}
+
 	usrsctp_close(s_l);
+
 	if ((line = malloc(LINE_LENGTH)) == NULL) {
 		exit(EXIT_FAILURE);
 	}

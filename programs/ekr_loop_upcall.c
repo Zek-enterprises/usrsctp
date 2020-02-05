@@ -54,6 +54,7 @@
 #define MAX_PACKET_SIZE (1<<16)
 #define LINE_LENGTH (1<<20)
 #define DISCARD_PPID 39
+#define NUMBER_OF_STEPS 10
 /* #define DUMP_PKTS_TO_FILE */
 
 #ifdef _WIN32
@@ -129,15 +130,21 @@ conn_output(void *addr, void *buf, size_t length, uint8_t tos, uint8_t set_df)
 
 #ifdef _WIN32
 	if (send(*fdp, buf, (int)length, 0) == SOCKET_ERROR) {
+		fprintf(stderr, "send() failed!\n");
+		exit(EXIT_FAILURE);
 		return (WSAGetLastError());
 #else
 	if (send(*fdp, buf, length, 0) < 0) {
+		fprintf(stderr, "send() failed!\n");
+		exit(EXIT_FAILURE);
 		return (errno);
 #endif
 	} else {
 		return (0);
 	}
 }
+
+
 
 static void
 handle_upcall(struct socket *sock, void *data, int flgs)
@@ -163,17 +170,18 @@ handle_upcall(struct socket *sock, void *data, int flgs)
 		} else if (n > 0) {
 			if (flags & MSG_NOTIFICATION) {
 				printf("Notification of length %d received.\n", (int)n);
-			} else {
-				printf("Message of length %d received via %p:%u on stream %u with SSN %u and TSN %u, PPID %u, context %u, flags %x.\n",
-				       (int)n,
-				       addr.sconn.sconn_addr,
-				       ntohs(addr.sconn.sconn_port),
-				       rn.recvv_rcvinfo.rcv_sid,
-				       rn.recvv_rcvinfo.rcv_ssn,
-				       rn.recvv_rcvinfo.rcv_tsn,
-				       ntohl(rn.recvv_rcvinfo.rcv_ppid),
-				       rn.recvv_rcvinfo.rcv_context,
-				       flags);
+			} else if (infotype == SCTP_RECVV_RCVINFO) {
+				debug_printf("MSG RCV: length %d, addr %p:%u, stream %u, SSN %u, TSN %u, PPID %u, context %u, %s%s.\n",
+					(int)n,
+					addr.sconn.sconn_addr,
+					ntohs(addr.sconn.sconn_port),
+					rn.recvv_rcvinfo.rcv_sid,
+					rn.recvv_rcvinfo.rcv_ssn,
+					rn.recvv_rcvinfo.rcv_tsn,
+					ntohl(rn.recvv_rcvinfo.rcv_ppid),
+					rn.recvv_rcvinfo.rcv_context,
+					(rn.recvv_rcvinfo.rcv_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
+					(flags & MSG_EOR) ? ", EOR" : "");
 			}
 		} else {
 			usrsctp_deregister_address(data);
@@ -306,7 +314,7 @@ main(int argc, char *argv[])
 #else
 	pthread_t tid_c, tid_s;
 #endif
-	int cur_buf_size, snd_buf_size, rcv_buf_size, on;
+	int i, j, cur_buf_size, snd_buf_size, rcv_buf_size, sendv_retries_left, on;
 	socklen_t opt_len;
 	struct sctp_sndinfo sndinfo;
 	char *line;
@@ -320,6 +328,8 @@ main(int argc, char *argv[])
 		client_port = atoi(argv[1]);
 		server_port = atoi(argv[2]);
 	}
+
+	debug_printf("starting program\n");
 
 #ifdef _WIN32
 	if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
@@ -476,6 +486,7 @@ main(int argc, char *argv[])
 		perror("usrsctp_setsockopt");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Bind the client side. */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -488,6 +499,7 @@ main(int argc, char *argv[])
 		perror("usrsctp_bind");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Bind the server side. */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -500,11 +512,13 @@ main(int argc, char *argv[])
 		perror("usrsctp_bind");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Make server side passive... */
 	if (usrsctp_listen(s_l, 1) < 0) {
 		perror("usrsctp_listen");
 		exit(EXIT_FAILURE);
 	}
+
 	/* Initiate the handshake */
 	memset(&sconn, 0, sizeof(struct sockaddr_conn));
 	sconn.sconn_family = AF_CONN;
@@ -526,27 +540,58 @@ main(int argc, char *argv[])
 	usrsctp_set_upcall(s_s, handle_upcall, &fd_s);
 
 	usrsctp_close(s_l);
+
 	if ((line = malloc(LINE_LENGTH)) == NULL) {
 		exit(EXIT_FAILURE);
 	}
 	memset(line, 'A', LINE_LENGTH);
 	sndinfo.snd_sid = 1;
-	sndinfo.snd_flags = SCTP_UNORDERED;
 	sndinfo.snd_ppid = htonl(DISCARD_PPID);
 	sndinfo.snd_context = 0;
 	sndinfo.snd_assoc_id = 0;
-	/* Send a 1 MB ordered message */
-	if (usrsctp_sendv(s_c, line, LINE_LENGTH, NULL, 0, (void *)&sndinfo,
-	                 (socklen_t)sizeof(struct sctp_sndinfo), SCTP_SENDV_SNDINFO, 0) < 0) {
-		perror("usrsctp_sendv");
-		exit(EXIT_FAILURE);
+
+	for (i = 0; i < NUMBER_OF_STEPS; i++) {
+		j = 0;
+		if (i % 2) {
+			sndinfo.snd_flags = SCTP_UNORDERED;
+		} else {
+			sndinfo.snd_flags = 0;
+		}
+		/* Send a 1 MB message */
+		sendv_retries_left = 120;
+		debug_printf("usrscp_sendv - step %d - call %d flags %x\n", i, ++j, sndinfo.snd_flags);
+		while (usrsctp_sendv(s_c, line, LINE_LENGTH, NULL, 0, (void *)&sndinfo,
+				 (socklen_t)sizeof(struct sctp_sndinfo), SCTP_SENDV_SNDINFO, 0) < 0) {
+			fprintf(stderr,"usrsctp_sendv - errno: %d - %s\n", errno, strerror(errno));
+			if (errno != EWOULDBLOCK || !sendv_retries_left) {
+				exit(EXIT_FAILURE);
+			}
+			sendv_retries_left--;
+#ifdef _WIN32
+			Sleep(1000);
+#else
+			sleep(1);
+#endif
+		}
+		/* Send a 1 MB message */
+		sendv_retries_left = 120;
+		debug_printf("usrscp_sendv - step %d - call %d flags %x\n", i, ++j, sndinfo.snd_flags);
+		while (usrsctp_sendv(s_c, line, LINE_LENGTH, NULL, 0, (void *)&sndinfo,
+				 (socklen_t)sizeof(struct sctp_sndinfo), SCTP_SENDV_SNDINFO, 0) < 0) {
+			fprintf(stderr,"usrsctp_sendv - errno: %d - %s\n", errno, strerror(errno));
+			if (errno != EWOULDBLOCK || !sendv_retries_left) {
+				exit(EXIT_FAILURE);
+			}
+			sendv_retries_left--;
+#ifdef _WIN32
+			Sleep(1000);
+#else
+			sleep(1);
+#endif
+		}
+		debug_printf("Sending done, sleeping\n");
 	}
-	/* Send a 1 MB ordered message */
-	if (usrsctp_sendv(s_c, line, LINE_LENGTH, NULL, 0, (void *)&sndinfo,
-	                 (socklen_t)sizeof(struct sctp_sndinfo), SCTP_SENDV_SNDINFO, 0) < 0) {
-		perror("usrsctp_sendv");
-		exit(EXIT_FAILURE);
-	}
+
 	free(line);
 	usrsctp_shutdown(s_c, SHUT_WR);
 
